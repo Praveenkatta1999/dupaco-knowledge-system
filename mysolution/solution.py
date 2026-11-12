@@ -533,6 +533,16 @@ HOURS_Q = re.compile(r"\bhours?\b|\bwhat time\b|\bopen until\b", re.I)
 ADDRESS_Q = re.compile(r"\b(address|located|location of|where is)\b", re.I)
 ROUTING_Q = re.compile(r"\brouting\b|\baba\b", re.I)
 SAME_Q = re.compile(r"\b(same|all branches|every branch|differ|different|vary|varies)\b", re.I)
+HOWTO_Q = re.compile(r"^\s*(how (do|can|should|would) (i|we)|how to|what should i do|what do i do)\b", re.I)
+WHO_Q = re.compile(r"^\s*who (is|are|can|qualifies)\b", re.I)
+WHATIS_Q = re.compile(r"^\s*(what is|what's|what are|tell me about|describe|explain)\b", re.I)
+WEAK_INTENT = {stem(w) for w in ("eligible", "eligibility", "update", "change", "become", "way", "step", "steps",
+                                 "process", "able", "allowed", "qualify", "qualifies", "program")}
+LEGAL_URL = re.compile(r"\.pdf|/hubfs/|disclosure|privacy|policy|terms|agreement|conditions")
+MEMBER_PATHS = ("/about", "/contact", "/join", "/membership", "/member", "/faq")
+AMOUNT_RX = re.compile(r"\$\s?\d|\d+(?:\.\d+)?%|\b(?:19|20)\d\d\b|\bup to\b|\bmaximum\b|\bminimum\b|\blimit", re.I)
+ACTION_RX = re.compile(r"\b\d{3}[-.)\s]\d{3}[-.]\d{4}\b|https?://|\bwww\.|\b(call|visit|log in|login|sign in|online|"
+                       r"go to|stop by|contact us|app)\b", re.I)
 CONTINUE_RX = re.compile(r"^(this (initiative|program|benefit|offer|account|loan|card|service|grant)|"
                          r"you (may|can) also|or you can|alternatively|additionally)\b", re.I)
 COUNT_WORDS = {"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"}
@@ -1053,6 +1063,13 @@ class Knowledge:
             return Answer(text=REFUSE_GENERAL, confident=False)
         act = self._active(sid)
         weights = {t: self._idf(t) for t in qtoks}
+        intent = ("howto" if HOWTO_Q.search(q) else "who" if WHO_Q.search(q) else
+                  "whatis" if WHATIS_Q.search(q) else None)
+        if intent:
+            for t in qtoks:                 # match on the topic ("member", "Home$tart"), not on "eligible"/"update"
+                if t in WEAK_INTENT:
+                    weights[t] *= 0.3
+            key_terms = [t for t in qtoks if t not in WEAK_INTENT]
         total = sum(weights.values())
         count_q = bool(re.search(r"\bhow (many|much)\b|\bnumber of\b", q, re.I))
         scored = []
@@ -1075,6 +1092,15 @@ class Knowledge:
             w *= 1.0 + 0.2 * sum(1 for t in qtoks if token_hit(t, s.title) and not token_hit(t, s.toks))
             if s.text.endswith("?") and sc >= 0.7 * total:
                 w *= 1.35         # an FAQ question matching the member's question; its answer follows it
+            if intent:
+                path = url_path(doc.url)
+                if LEGAL_URL.search(doc.url.lower()):
+                    w *= 0.6      # legal/disclosure/PDF fine print is a poor answer to a member's how/who/what
+                elif path.startswith(MEMBER_PATHS) or s.text.endswith("?"):
+                    w *= 1.25     # member-facing pages: about, join, membership, contact, FAQ
+                elif doc.authority >= 90 and key_terms and not any(
+                        token_hit(t, s.title) or t in path for t in key_terms):
+                    w *= 0.8      # a product page about something else
             scored.append((sc * w, cov / total, sidx))
         if not scored:
             return Answer(text=REFUSE_GENERAL, confident=False)
@@ -1135,6 +1161,25 @@ class Knowledge:
         nxt = max(order) + 1
         if nxt < len(ids) and CONTINUE_RX.match(self.sents[ids[nxt]].text):
             order.add(nxt)
+        if intent and len(order) < 3:
+            # build the answer from the best 2-3 sentences of the same section: "what is" prefers amounts,
+            # dates and limits; "how do I" prefers the actionable part (phone, URL, steps); "who" takes the list
+            extras = []
+            for k in range(max(0, pos - 2), min(len(ids), pos + 5)):
+                nb = self.sents[ids[k]]
+                if k in order or nb.head_text != s.head_text or nb.text.endswith("?"):
+                    continue
+                val = sum(weights[t] for t in qtoks if token_hit(t, nb.toks)) / total
+                if intent == "whatis" and AMOUNT_RX.search(nb.text):
+                    val += 1.0
+                elif intent == "howto" and ACTION_RX.search(nb.text):
+                    val += 1.0
+                elif intent == "who":
+                    val += 0.5
+                if val >= 0.5:
+                    extras.append((val, k))
+            for _, k in sorted(extras, key=lambda x: (-x[0], x[1]))[:3 - len(order)]:
+                order.add(k)
         order = sorted(order)
         text = " ".join(self.sents[ids[k]].text for k in order)[:700]
         # give a bare sentence its subject: prefix the section heading when it names what was asked
