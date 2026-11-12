@@ -592,6 +592,13 @@ ROUTING_Q = re.compile(r"\brouting\b|\baba\b", re.I)
 SAME_Q = re.compile(r"\b(same|all branches|every branch|differ|different|vary|varies)\b", re.I)
 HOWTO_Q = re.compile(r"^\s*(how (do|can|should|would) (i|we)|how to|what should i do|what do i do)\b", re.I)
 WHO_Q = re.compile(r"^\s*who (is|are|can|qualifies)\b", re.I)
+SERVICE_AREA_RX = re.compile(r"\b(serves?|serving)\b[^.]{0,40}\b\d+\s+counties\b", re.I)
+US_STATE_RX = re.compile(r"\b(Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|"
+                         r"Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|"
+                         r"Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|"
+                         r"New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|"
+                         r"Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|"
+                         r"West Virginia|Wisconsin|Wyoming)\b")
 PHONE_Q = re.compile(r"\b(phone|telephone|what number|which number|number (do|should|can) i call|"
                      r"who (do|should|can) i (call|contact)|how (do|can|should) i report|report (a|my|it)|"
                      r"what (should|do) i do (if|when))\b", re.I)
@@ -1291,8 +1298,31 @@ class Knowledge:
                 break
         if not body:
             return None
-        text = f"{head}: " + " ".join(body)
-        return Answer(text=text[:700], sources=[Source(url=doc.url, snapshot_id=doc.snapshot_id, quote=body[0][:200])])
+        text = (f"{head}: " + " ".join(body))[:700]
+        sources = [Source(url=doc.url, snapshot_id=doc.snapshot_id, quote=body[0][:200])]
+        if re.search(r"\bcharter area\b", text, re.I):
+            area = self._service_area(sid)        # "charter area" is a map link; say what it covers, with its source
+            if area:
+                text += f" {area[0]}"
+                sources.append(Source(url=area[1].url, snapshot_id=area[1].snapshot_id, quote=area[0][:200]))
+        return Answer(text=text, sources=sources)
+
+    def _service_area(self, sid):
+        """The sentence that states Dupaco's service area by county and state ('... serves residents in N counties
+        throughout Iowa, ... Wisconsin'), from the most recently published page that has one."""
+        best = None
+        act = self._active(sid)
+        for sidx in self.postings.get("county", ()):
+            s = self.sents[sidx]
+            if s.doc not in act or not SERVICE_AREA_RX.search(s.text):
+                continue
+            if len({m.group(0).lower() for m in US_STATE_RX.finditer(s.text)}) < 2:
+                continue
+            doc = self.docs[s.doc]
+            key = (doc.pub or "", act[s.doc], -sidx)
+            if best is None or key > best[0]:
+                best = (key, s.text, doc)
+        return (best[1], best[2]) if best else None
 
     def _phone_answer(self, q, sid):
         """'Who do I call / what number / how do I report / what should I do if ...': a sentence that gives a phone
