@@ -242,6 +242,7 @@ class Fact:
     snapshot_id: str = ""
     taken_on: str = ""
     present: bool = True             # False = carried forward from an older snapshot
+    family: str = ""                 # product family: certificate, savings, checking, auto, mortgage, card, ...
 
     def main_measure(self) -> str:
         for k in ("APY", "APR", "rate", "dividend rate", "fee", "value"):
@@ -289,7 +290,9 @@ def is_caption(line: str) -> bool:
     s = line.strip()
     if not s or len(s) > 70 or s[0] in "|[!<\\" or s.startswith("Rates are"):
         return False
-    if re.match(r"^\d", s) or "effective as of" in s.lower() or s.endswith((".", ":")):
+    # footnotes start with a digit ("1Checking Rates: ..."); product names like "1st Rate Checking" are captions
+    if (re.match(r"^\d", s) and not re.match(r"^\d+(st|nd|rd|th)\s", s)) or "effective as of" in s.lower() \
+            or s.endswith((".", ":")):
         return False
     return True
 
@@ -304,6 +307,44 @@ def clean_value(cell: str, kind: str) -> str:
 
 # "label: value" facts must be short and start with the number ("2.95%", "$2.50 per card", "as low as 5.39% APR"),
 # and the label must say what is measured. Prose like "Lower payments: 30-45% less than..." is not a fact.
+# Product families, most specific first. Applied to token sets of a table (caption, labels, headings, URL) and of
+# a question; a question that names a family only uses tables of that family.
+DEPOSIT_FAMILIES = {"hsa", "money market", "ira", "certificate", "checking", "savings"}
+
+
+def family_of(toks) -> Optional[str]:
+    t = set(toks)
+    if "health" in t and t & {"saving", "hsa"} or "hsa" in t:
+        return "hsa"
+    if "market" in t and "money" in t:
+        return "money market"
+    if t & {"ira", "roth", "traditional"}:
+        return "ira"
+    if t & {"certificate", "cd"}:
+        return "certificate"
+    if t & {"mortgage", "conventional"}:
+        return "mortgage"
+    if t & {"heloc", "equity"}:
+        return "home equity"
+    if "improvement" in t:
+        return "home improvement"
+    if "home" in t and "loan" in t:
+        return "mortgage"
+    if t & {"auto", "motorcycle", "vehicle", "car"}:
+        return "auto"
+    if t & {"boat", "rv", "atv", "snowmobile", "recreational"}:
+        return "recreational"
+    if "personal" in t and "loan" in t:
+        return "personal loan"
+    if t & {"visa", "card"}:
+        return "card"
+    if "checking" in t:
+        return "checking"
+    if "saving" in t:
+        return "savings"
+    return None
+
+
 LINE_VALUE_RE = re.compile(r"^(?:as low as\s+|only\s+)?\$?\s?\d[\d,]*(?:\.\d+)?\s*%?(?:\s*[-–]\s*\$?\d[\d,]*(?:\.\d+)?%?)?"
                            r"(?:\s*(?:apr|apy|fee|per \w+|each|a month|monthly))?\s*[.;]?\s*(?:\(.*\))?$", re.I)
 LINE_LABEL_RE = re.compile(r"\b(apy|apr|rate|yield|dividend|fee|charge|cost|price|minimum|maximum)\b", re.I)
@@ -332,7 +373,8 @@ def extract_facts(md: str, url: str, title: str, auth: int) -> list:
                         core = set(tokens(desc))
                         facts.append(Fact(product=lab, label="", measures={kind: v}, url=url, authority=auth,
                                           term=term_months(lab) or term_months(val), amount=None,
-                                          core=core, context=ctx_tokens - core, table_id=-1))
+                                          core=core, context=ctx_tokens - core, table_id=-1,
+                                          family=family_of(core) or ""))
             i += 1
             continue
         # ---- markdown tables
@@ -393,6 +435,21 @@ def extract_facts(md: str, url: str, title: str, auth: int) -> list:
                 table_id=tid, term=term_months(label) or term_months(caption), amount=amount_range(label),
                 model_years=model_year_range(label), core=core,
                 context=(set(tokens(section)) | ctx_tokens | near_tokens) - core))
+        # product family of the whole table, from the most specific evidence to the loosest
+        deposit = any(k in ("APY", "dividend rate") for k in kinds)
+        heading = next((clean_inline(lines[k]) for k in range(i - 1, -1, -1) if lines[k].startswith("#")), "")
+        caption_toks = set(tokens(caption)) | set().union(*(set(tokens(f.label)) for f in table_facts)) \
+            if table_facts else set(tokens(caption))
+        fam = None
+        for src in (caption_toks,
+                    "certificate" if deposit and table_facts and all(f.term for f in table_facts) else None,
+                    set(tokens(section)), set(tokens(heading)), ctx_tokens, near_tokens):
+            cand = src if isinstance(src, str) else family_of(src) if src else None
+            if cand and (cand in DEPOSIT_FAMILIES) == deposit:
+                fam = cand
+                break
+        for f in table_facts:
+            f.family = fam or ""
         ranges = sorted({f.model_years for f in table_facts if f.model_years}, key=lambda r: -r[1])
         for f in table_facts:
             if f.model_years:
@@ -629,6 +686,8 @@ def score_fact(qu: Query, f: Fact):
         score += 1.0   # listing a whole category: include business products, ranked after personal ones
     if "business" in qu.words and "business" not in f.core | f.context:
         score -= 1.5
+    elif "business" not in qu.words and "business" not in f.core and url_path(f.url).startswith("/business"):
+        score -= 0.5          # a table on a business page (by URL) ranks below the personal page's copy
     if qu.term and f.term == qu.term:
         score += 1.0
     elif qu.term and not f.term:
@@ -928,8 +987,11 @@ class Knowledge:
     # ---- facts (rates and fees)
     def _rank_facts(self, q, sid):
         qu = parse_question(q)
+        qfam = family_of(tokens(q))
         scored = []
         for f in self.fact_view.get(sid, []):
+            if qfam and f.family != qfam:
+                continue          # "certificate rates" never draws on savings/checking/loan tables
             r = score_fact(qu, f)
             if r and r[1] >= 0.6 and r[0] > 0:
                 scored.append((r[0], f))
@@ -1081,7 +1143,7 @@ class Knowledge:
         """A list of regular certificate terms also mentions the certificate specials on the same page, as of the
         same snapshot (e.g. 10- and 17-month, regular and jumbo)."""
         def is_cert(f):
-            return "certificate" in f.core | f.context
+            return f.family == "certificate"
         odd = {"special", "jumbo", "business", "ira", "roth", "traditional"}
         if len(rows) < 3 or not all(is_cert(f) for f in rows) or any(f.core & odd for f in rows):
             return []
