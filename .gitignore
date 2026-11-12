@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
-snapshots/
-snapshots_zip/
+.venv/
+/snapshots/
+/snapshots_zip/
 Knowledge-Hackathon-Assignment.pdf

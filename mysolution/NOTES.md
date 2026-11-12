@@ -1,0 +1,84 @@
+# NOTES — mysolution
+
+A deterministic, rules-and-retrieval knowledge system over the five website snapshots.
+**No API key is needed. No LLM is called.** It uses only the Python standard library.
+
+## How to run
+
+```bash
+python harness/run_eval.py --submission mysolution --eval eval/public_eval.jsonl
+```
+
+Loading all five snapshots takes about 7 s. Answers take well under 1 s at the 95th percentile.
+
+## Approach
+
+**Ingest.** Every page of every snapshot is kept. Each unique page version (URL plus content hash) is parsed once into:
+- **Facts** from every markdown rate table. Each fact records the product (from the table caption and nearby text), the row label, and the tiers: term, model-year range, balance or loan-amount range. It also records each measure in the row (rate, dividend rate, APY, APR, fee), the table's "Rates are effective as of" date, and the page. Short `label: value` lines such as `Replacement fee: $2.50` become facts too. Rows marked as expired ("offer ended 2025-09-30") are dropped.
+- **Sentences** for keyword search, each tagged with its section heading and the page title.
+- **Links**, branch **hours** blocks (Lobby and Drive-up schedules), the **branch locator** (addresses), **routing numbers**, and each article's **publication date**.
+
+A snapshot's *view* is every page present in that snapshot, plus the newest copy of any page seen earlier but missing now. Carried-forward pages rank below live ones.
+
+**Which snapshot.** With `as_of`, the newest snapshot taken on or before that date is used. A date written in the question ("as of May 2026") is treated the same way. Without a date, snapshot 05 is used.
+
+## How "current" is decided
+
+1. **Authority first.** Pages rank in this order:
+   - product or rate page (`/personal/*`, `/business/*`);
+   - rate sheet (`/rates`);
+   - about and contact pages;
+   - general pages;
+   - promotion landing pages;
+   - calculators;
+   - blog, learn and newsroom pages;
+   - legacy `info.` host pages.
+
+   A stale table on a calculator or promotion page never beats the product page.
+2. **Then the effective date.** If two equally trusted pages match equally well, the newer "Rates are effective as of" date wins. For example, an old copy of the auto table left on the checking page loses to the auto page's own table.
+3. **Then recency of publication.** This applies to facts that only articles state, such as branch counts, awards and closures. Among near-equal matches, the most recently published article wins. Pages without a date that are live in the current view count as current.
+
+## Answering
+
+Questions are routed in this order:
+1. **Routing number:** a vote across pages, weighted by authority.
+2. **Link questions:**
+   - For "link to see certificate rates", the product page that holds those rates, plus `#rates`.
+   - Otherwise, the best-matching `dupaco.com` link. A subdomain that matches the action wins: "join online" gives `join.dupaco.com`.
+3. **Hours:** the most common Lobby or Drive-up schedule, followed by a question asking which branch. "Do all branches have the same hours" gets two differing schedules. For a named branch, that branch's posted hours are used. If none are posted, the answer is a refusal.
+4. **Branch address:** taken from the locator. A branch that isn't listed gets a refusal.
+5. **Rates and fees:**
+   - Facts are matched on product words. A row is excluded if its term, model year or balance or loan amount contradicts the question.
+   - Business, jumbo, IRA, refinance and intro rows rank lower unless the question asks for them.
+   - Rows come from **one** table on the most authoritative page:
+     - an exact tier when the question names one;
+     - all tiers of that one product when it doesn't;
+     - one row for "highest" or "lowest";
+     - personal products first, then business, for "what … do you offer".
+6. **Everything else:** sentence search.
+   - Scoring uses IDF, page authority, page-title context and a boost for FAQ questions.
+   - For "how many X", only sentences that state a number before X are kept, and dated pages are preferred.
+   - The best sentence is joined with the neighbouring sentence that covers the question words it is missing. When the section heading names what was asked, it is added as a prefix.
+
+Answers stay short. They never list values from other pages or older snapshots. Any disagreement goes in `conflict_note`, not in the answer text. Answers are cached per (normalised question, snapshot), so asking twice gives the same answer.
+
+## Refusal logic
+
+The system answers `confident=False`, with text that contains **no digits**, when:
+- a rate is asked for a product with no published rate fact and no prose sentence quoting such a rate (for example a 7/1 ARM, a construction loan, or a special that didn't exist on the `as_of` date);
+- a named branch has no posted hours or address;
+- the best search match covers less than 45% of the question's weighted words.
+
+## Conflict rules (`conflicts()`)
+
+Conflicts are reported for the latest snapshot:
+- **Stale copies.** A lower-authority page states a different value for the same product, term, model-year tier position, loan-amount tier and measure as a product or rate page. The resolution is the product page's value. The reason names the stale page type and the effective date.
+- **Changed between snapshots.** A value on the same product or rate page, for the same row and measure, differs from an earlier snapshot. The resolution is the newest value.
+- **Contradictory dated claims.** Different branch counts, or different Forbes recognition counts, across pages. The resolution is the most recently published page.
+
+Different tiers are never reported as conflicts. The same change shown in several tables (personal, business, IRA) is reported once. Formatting artifacts ("2.90%" vs "2.90%–12.50%") are skipped.
+
+## Testing
+
+- `tests/my_questions.jsonl`: 36 of my own questions. They include rewordings, `as_of` dates, other rates, fees and branches, and refusals. Expected values were checked against the raw snapshot pages.
+- `harness/selftest`: the kit's tiny selftest, including `--conflicts-gold`. It scores 1.0.
