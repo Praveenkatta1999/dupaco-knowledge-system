@@ -1,120 +1,130 @@
 # NOTES — mysolution
 
-A deterministic, rules-and-retrieval knowledge system over the five website snapshots.
-**No API key is needed. No LLM is called.** It uses only the Python standard library.
+A deterministic, rules-and-retrieval knowledge system over the five website snapshots. It uses only the Python standard library. **No API key is needed and no LLM is called.** The code never reads `ANTHROPIC_API_KEY` or any other environment variable.
+
+Public eval: **0.921**, with no stale-value trap hits. Loading the snapshots takes about 10 s, and 95% of answers come back within about 0.35 s.
 
 ## Running the eval
 
-The snapshot data is **not in this repo, by design**: the website data is shared for the event only and must not be redistributed. `snapshots/` and `snapshots_zip/` are listed in `.gitignore`.
-
-Before running, copy the kit's `snapshots_zip/` folder into the repo root:
-
-```text
-<repo root>/
-  snapshots_zip/              <- copy from the hackathon kit (5 zip files)
-    01_2026-05-12_baseline.zip
-    ...
-    05_2026-09-28_latest.zip
-  mysolution/
-  harness/
-  ...
-```
-
-Then, from the repo root:
+The snapshot data is **not in this repo, by design**: the website data is shared for the event only. `snapshots/` and `snapshots_zip/` are git-ignored. Copy the kit's `snapshots_zip/` folder (5 zip files) into the repo root, then run:
 
 ```bash
-pip install -r requirements.txt          # no third-party packages; standard library only
+pip install -r requirements.txt     # empty: standard library only
 python harness/run_eval.py --submission mysolution --eval eval/public_eval.jsonl
 ```
 
-On the first run the scorer unpacks the zips into `snapshots/`. Without `snapshots_zip/`, the scorer stops with `FileNotFoundError: 'snapshots'`.
-
-Optional checks:
-
-```bash
-python harness/run_eval.py --submission mysolution --eval tests/my_questions.jsonl
-python harness/run_eval.py --submission mysolution --snapshots harness/selftest/snapshots \
-    --eval harness/selftest/eval.jsonl --conflicts-gold harness/selftest/conflicts_gold.json
-```
-
-Loading all five snapshots takes about 10 s. Answers take under 0.5 s at the 95th percentile.
+The scorer unpacks the zips into `snapshots/` on its first run. Without them it stops with `FileNotFoundError: 'snapshots'`. This was tested from a fresh clone in a clean Python 3.11 venv, with no API key set.
 
 ## Approach
 
-**Ingest.** Every page of every snapshot is kept. Each unique page version (URL plus content hash) is parsed once into:
-- **Facts** from every markdown rate table. Each fact records the product (from the table caption and nearby text), the row label, and the tiers: term, model-year range, balance or loan-amount range. It also records each measure in the row (rate, dividend rate, APY, APR, fee), the table's "Rates are effective as of" date, and the page. Short `label: value` lines such as `Replacement fee: $2.50` become facts too. Rows marked as expired ("offer ended 2025-09-30") are dropped.
-- **Sentences** for keyword search, each tagged with its section heading and the page title.
-- **Links**, branch **hours** blocks (Lobby and Drive-up schedules), the **branch locator** (addresses), **routing numbers**, and each article's **publication date**.
+**Ingest.** Every page of every snapshot is kept, and each unique page version is parsed once into:
+- **rate and fee facts** from markdown tables and short `label: value` lines;
+- **sentences** for search, each tagged with its section heading and the page title;
+- links, branch-hours blocks, the branch locator, routing numbers, and article publication dates.
 
-A snapshot's *view* is every page present in that snapshot, plus the newest copy of any page seen earlier but missing now. Carried-forward pages rank below live ones.
+Each fact records:
+- the product and the row label;
+- its tiers: term, model-year range, balance or loan-amount range;
+- each measure: rate, dividend rate, APY, APR or fee;
+- the table's "Rates are effective as of" date;
+- a **product family**.
 
-**Which snapshot.** With `as_of`, the newest snapshot taken on or before that date is used. A date written in the question ("as of May 2026") is treated the same way. Without a date, snapshot 05 is used.
+Expired offers ("offer ended …") are dropped.
+
+A snapshot's view is its own pages plus the newest copy of any page seen earlier but now missing. Those carried-forward pages rank lower than live ones.
+
+**Which snapshot.** With `as_of`, or a date in the question such as "as of May 2026", the newest snapshot on or before that date is used. Otherwise the latest snapshot is used.
+
+**Product families.** Each table gets one family: certificate, savings, checking, money market, HSA, IRA, auto, mortgage, home equity, card, and so on. The evidence is used in this order:
+1. caption and row labels;
+2. structure: a deposit table whose rows are terms is a certificate table;
+3. section caption and heading;
+4. the page;
+5. nearby text.
+
+APR tables can never become deposit families. A question that names a family only uses tables of that family.
 
 ## How "current" is decided
 
-1. **Authority first.** Pages rank in this order:
-   - product or rate page (`/personal/*`, `/business/*`);
-   - rate sheet (`/rates`);
-   - about and contact pages;
-   - general pages;
-   - promotion landing pages;
-   - calculators;
-   - blog, learn and newsroom pages;
-   - legacy `info.` host pages.
+1. **Authority.** Pages rank in this order:
+   1. product page (`/personal/*`, `/business/*`)
+   2. rate sheet (`/rates`)
+   3. about and contact pages
+   4. general pages
+   5. promotion pages
+   6. calculators
+   7. blog, learn and newsroom pages
+   8. legacy `info.` pages
 
-   A stale table on a calculator or promotion page never beats the product page.
-2. **Then the effective date.** If two equally trusted pages match equally well, the newer "Rates are effective as of" date wins. For example, an old copy of the auto table left on the checking page loses to the auto page's own table.
-3. **Then recency of publication.** This applies to facts that only articles state, such as branch counts, awards and closures. Among near-equal matches, the most recently published article wins. Pages without a date that are live in the current view count as current.
+   Tag and author index pages aren't indexed. A `/business` page's copy of a table ranks below the personal page's copy unless the question says "business".
+2. **Effective date.** Between equally trusted, equally matching pages, the newer "Rates are effective as of" date wins.
+3. **Publication date.** For facts that only articles state (branch counts, awards, closures), the most recently published article wins.
+
+Answers quote values from **one** table on the winning page. Disagreeing values are never listed in the answer; they go in `conflict_note`.
 
 ## Answering
 
 Questions are routed in this order:
 1. **Routing number:** a vote across pages, weighted by authority.
-2. **Link questions:**
-   - For "link to see certificate rates", the product page that holds those rates, plus `#rates`.
-   - Otherwise, the best-matching `dupaco.com` link. A subdomain that matches the action wins: "join online" gives `join.dupaco.com`.
-3. **Hours:** the most common Lobby or Drive-up schedule, followed by a question asking which branch. "Do all branches have the same hours" gets two differing schedules. For a named branch, that branch's posted hours are used. If none are posted, the answer is a refusal.
-4. **Branch address:** taken from the locator. A branch that isn't listed gets a refusal.
-5. **Rates and fees:**
-   - Facts are matched on product words. A row is excluded if its term, model year or balance or loan amount contradicts the question.
-   - Business, jumbo, IRA, refinance and intro rows rank lower unless the question asks for them.
-   - Rows come from **one** table on the most authoritative page:
-     - an exact tier when the question names one;
-     - all tiers of that one product when it doesn't;
-     - one row for "highest" or "lowest";
-     - personal products first, then business, for "what … do you offer".
-   - Certificate list answers add a second line with the current specials from the same page and snapshot.
-   - **Product families.** Each table is assigned one family (certificate, savings, checking, money market, HSA, IRA, auto, mortgage, home equity, card, …). The evidence is used in this order: the table's caption and row labels; then structure (a deposit table whose rows are terms is a certificate table); then the section caption and heading; then the page; then nearby text. A deposit/loan guard keeps APR tables out of the deposit families. A question that names a family uses only tables of that family. A copy of a table on a `/business` page ranks below the personal page's copy unless the question says "business".
-6. **Change questions:** this applies only when the question explicitly asks about change or history ("change", "changed", "previously", "used to", "before", "went up/down", "increase/decrease").
-   - The same row on the same page is followed snapshot by snapshot, and the answer is given as `old value (from date) → new value (from date)`.
-   - Rows relabelled between crawls are still followed (for example "2023–26 Model Year" becoming "2024-27 Model Year"). The match uses the same page, term and tier position.
-   - All other questions return only the current value.
-7. **Eligibility and requirements questions:** these are answered from the best whole *section*, meaning a heading plus its bullets. The heading must be about eligibility or requirements, and the section must cover the question's topic. If the answer mentions the "charter area", the site's service-area sentence ("serves residents in N counties throughout Iowa, … Wisconsin", from the newest dated page) is appended with its source.
-   - **Phone and contact questions** ("who do I call", "what number", "how do I report", "what should I do if …") are answered from a sentence that contains a phone number *and* the question's topic. Numbers are shown in `800-373-7600` form.
-8. **Everything else:** sentence search.
-   - Scoring uses IDF, page authority, page-title context and a boost for FAQ questions.
-   - For "how many X", only sentences that state a number before X are kept, and dated pages are preferred.
-   - The best sentence is joined with the neighbouring sentence that covers the question words it is missing. When the section heading names what was asked, it is added as a prefix.
+2. **Links:** a product page plus `#rates` for "link to … rates". Otherwise the best `dupaco.com` link; a matching subdomain wins (`join.dupaco.com` for "join online").
+3. **Hours:** the most common Lobby or Drive-up schedule, then "which branch?". Asked whether all branches are the same, it gives two schedules. A named branch gets its own posted hours.
+4. **Branch address:** from the locator.
+5. **Change questions:** only when the question explicitly asks about change ("change", "previously", "used to", "before", "went up/down", "increase/decrease"). The same row is followed through the snapshots: `old (from date) → new (from date)`. This still works when a tier was relabelled between crawls.
+6. **Rates and fees:**
+   - an exact tier, or all tiers of one product if no tier is named;
+   - one row for "highest" or "lowest";
+   - personal then business products for "what … do you offer";
+   - certificate lists add a line with the current specials.
+7. **Search:**
+   - Phone and contact questions use a sentence that has a phone number and the question's topic.
+   - Eligibility and requirements questions use the best whole section, i.e. a heading plus its bullets. If that answer mentions the "charter area", the site's service-area sentence (counties and states) is added.
+   - Otherwise, sentence search:
+     - The best sentence is joined with any neighbouring sentence that covers question words it is missing, or that continues it.
+     - For "how do I / who / what is" questions, legal pages and PDFs weigh less and member-facing pages weigh more.
+     - "How many" questions only use sentences that state a number, and prefer dated pages.
 
-Answers stay short. They never list values from other pages or older snapshots. Any disagreement goes in `conflict_note`, not in the answer text. Answers are cached per (normalised question, snapshot), so asking twice gives the same answer.
+Answers are cached per (question, snapshot), so they're deterministic.
 
 ## Refusal logic
 
-The system answers `confident=False`, with text that contains **no digits**, when:
-- a rate is asked for a product with no published rate fact and no prose sentence quoting such a rate (for example a 7/1 ARM, a construction loan, or a special that didn't exist on the `as_of` date);
+The system returns `confident=False`, with text that contains no digits, when:
+- a rate is asked for a product that has no published rate (for example a 7/1 ARM, a construction loan, or a special that didn't exist on the `as_of` date);
 - a named branch has no posted hours or address;
-- the best search match covers less than 45% of the question's weighted words.
+- the best search match covers less than 45% of the question.
 
-## Conflict rules (`conflicts()`)
+## Conflicts (`conflicts()`)
 
-Conflicts are reported for the latest snapshot:
-- **Stale copies.** A lower-authority page states a different value for the same product, term, model-year tier position, loan-amount tier and measure as a product or rate page. The resolution is the product page's value. The reason names the stale page type and the effective date.
-- **Changed between snapshots.** A value on the same product or rate page, for the same row and measure, differs from an earlier snapshot. The resolution is the newest value.
-- **Contradictory dated claims.** Different branch counts, or different Forbes recognition counts, across pages. The resolution is the most recently published page.
+Conflicts are reported for the latest snapshot. About 35 are reported on this data. Each one gets a topic, its values, sources, a resolution and a reason.
+- **Stale copy:** a lower-authority page (calculator, promotion, blog) shows a different value for the same product, term, tier and measure as the product page. The product page's value wins.
+- **Changed between snapshots:** the same row on the same product page changed value. The newest value wins.
+- **Contradictory dated claims:** branch counts and Forbes recognition counts. The most recently published page wins.
 
-Different tiers are never reported as conflicts. The same change shown in several tables (personal, business, IRA) is reported once. Formatting artifacts ("2.90%" vs "2.90%–12.50%") are skipped.
+Different tiers are never reported as conflicts. The same change shown in personal, business and IRA tables is reported once.
 
 ## Testing
 
-- `tests/my_questions.jsonl`: 36 of my own questions. They include rewordings, `as_of` dates, other rates, fees and branches, and refusals. Expected values were checked against the raw snapshot pages.
-- `harness/selftest`: the kit's tiny selftest, including `--conflicts-gold`. It scores 1.0.
+- `tests/my_questions.jsonl` has 50 of my own questions, with expected values checked by hand against the raw snapshot pages. They cover:
+  - rewordings of public questions;
+  - `as_of` dates;
+  - other rates, fees and branches;
+  - refusals;
+  - change questions;
+  - eligibility;
+  - phone and contact questions;
+  - dated list questions that must not mix product families.
+
+  Score: **0.98**. Run it with `--eval tests/my_questions.jsonl`.
+- `harness/selftest`, run with `--conflicts-gold`, scores **1.0** (conflict F1 1.0).
+
+## Known limitations
+
+These are the public questions that still score below 1.0:
+
+| Question | Score | Why it falls short |
+|---|---|---|
+| dup-064, dup-066 (lobby and drive-up hours) | 0.85 | The hours are correct, but they come from branch-opening press releases. The expected source pages (`/`, `/contact`) contain no hours in any snapshot. |
+| dup-005 (certificate rates) | 0 locally | The eval item lists no required values. Our answer lists every term plus the specials. |
+| dup-060 (update contact info) | 0 | The only grounded answer is in the privacy policy. No general rule picks it out over better-matching sentences. |
+| dup-088 (volunteer time off) | 0 | We give the newest figure with its year (256 in 2024). The expected answer is the older 2023 figure (294). |
+
+In my own test set, the mobile-wallet list question still fails. The wallet names sit in a sentence that never says "mobile wallet".
