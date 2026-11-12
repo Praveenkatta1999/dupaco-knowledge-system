@@ -592,6 +592,12 @@ ROUTING_Q = re.compile(r"\brouting\b|\baba\b", re.I)
 SAME_Q = re.compile(r"\b(same|all branches|every branch|differ|different|vary|varies)\b", re.I)
 HOWTO_Q = re.compile(r"^\s*(how (do|can|should|would) (i|we)|how to|what should i do|what do i do)\b", re.I)
 WHO_Q = re.compile(r"^\s*who (is|are|can|qualifies)\b", re.I)
+PHONE_Q = re.compile(r"\b(phone|telephone|what number|which number|number (do|should|can) i call|"
+                     r"who (do|should|can) i (call|contact)|how (do|can|should) i report|report (a|my|it)|"
+                     r"what (should|do) i do (if|when))\b", re.I)
+PHONE_RX = re.compile(r"\b\d{3}[-.)\s]\d{3}[-.]\d{4}\b")
+PHONE_WORDS = {stem(w) for w in ("call", "phone", "telephone", "number", "contact", "report", "reach", "dial",
+                                 "who", "think", "victim")}
 REQ_Q = re.compile(r"\b(eligib\w*|requirements?|qualif\w*|what do i need|what does it take)\b", re.I)
 REQ_HEAD = {stem(w) for w in ("eligible", "eligibility", "requirement", "requirements", "qualify", "qualifications",
                               "qualification", "who")}
@@ -1288,7 +1294,40 @@ class Knowledge:
         text = f"{head}: " + " ".join(body)
         return Answer(text=text[:700], sources=[Source(url=doc.url, snapshot_id=doc.snapshot_id, quote=body[0][:200])])
 
+    def _phone_answer(self, q, sid):
+        """'Who do I call / what number / how do I report / what should I do if ...': a sentence that gives a phone
+        number AND mentions the question's topic (lost card, fraud, mortgage team ...)."""
+        topic = [t for t in dict.fromkeys(tokens(q)) if t not in GENERIC and len(t) > 1 and t not in PHONE_WORDS]
+        if not topic:
+            return None
+        idf = {t: self._idf(t) for t in topic}
+        total = sum(idf.values())
+        act = self._active(sid)
+        best = None
+        for sidx in self._candidates(topic, sid):
+            s = self.sents[sidx]
+            if not PHONE_RX.search(s.text):
+                continue
+            doc = self.docs[s.doc]
+            cov = sum(idf[t] for t in topic if token_hit(t, s.toks)) / total
+            if cov < 0.5:
+                continue
+            w = (0.7 + 0.3 * doc.authority / 100) * (1.0 if act[s.doc] else 0.7)
+            key = (round(cov, 3), w, doc.pub or "9999", -sidx)
+            if best is None or key > best[0]:
+                best = (key, s, doc)
+        if not best:
+            return None
+        _, s, doc = best
+        # present phone numbers in one standard form ("1.800.383.1700" -> "800-383-1700")
+        text = re.sub(r"(?<![\d])(?:1[.\s-])?\(?(\d{3})\)?[.\s-](\d{3})[.\s-](\d{4})(?![\d])", r"\1-\2-\3", s.text)
+        return Answer(text=text[:500], sources=[Source(url=doc.url, snapshot_id=doc.snapshot_id, quote=s.text[:200])])
+
     def _search_answer(self, q, sid):
+        if PHONE_Q.search(q):
+            a = self._phone_answer(q, sid)
+            if a:
+                return a
         if WHO_Q.search(q) or REQ_Q.search(q):
             a = self._section_answer(q, sid)
             if a:
