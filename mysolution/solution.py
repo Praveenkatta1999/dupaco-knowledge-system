@@ -1187,24 +1187,38 @@ class Knowledge:
                     f"the product rate page{' (effective ' + best.effective + ')' if best.effective else ''} is authoritative; "
                     f"the {kind} page is stale")
         # (b) changed between snapshots on the same authoritative page
-        cur = {(f.url, f.product, f.label, f.main_measure()): f for f in auth}
+        # key on (page, row label, measure): table captions get reworded between crawls; labels that are not
+        # unique on a page (e.g. "Standard" in two card tables) are skipped to avoid false matches
+        def ckey(f):
+            return (f.url, re.sub(r"\W+", " ", f.label or f.product).lower().strip(), f.main_measure())
+        counts = Counter(ckey(f) for f in auth)
+        cur = {ckey(f): f for f in auth if counts[ckey(f)] == 1}
+        sid_day = dict((s, d) for d, s in self.snapshots)[sid]
         for day, osid in self.snapshots:
-            if osid == sid or day > dict((s, d) for d, s in self.snapshots)[sid]:
+            if osid == sid or day > sid_day:
                 continue
+            ocounts = Counter(ckey(f) for f in self.fact_view[osid] if f.present and f.authority >= 90)
             for f in self.fact_view[osid]:
                 if not f.present or f.authority < 90:
                     continue
-                k = (f.url, f.product, f.label, f.main_measure())
+                k = ckey(f)
                 a = cur.get(k)
-                if a and a.measures[k[3]] != f.measures[k[3]]:
-                    add(a, f.measures[k[3]], Source(url=f.url, snapshot_id=f.snapshot_id),
+                if a and ocounts[k] == 1 and a.measures[k[2]] != f.measures.get(k[2], a.measures[k[2]]):
+                    add(a, f.measures[k[2]], Source(url=f.url, snapshot_id=f.snapshot_id),
                         f"newer snapshot {a.snapshot_id} shows the updated value"
                         f"{' (effective ' + a.effective + ')' if a.effective else ''}")
+        def variant(kv):   # report the plain personal product; business/IRA copies of the same change merge into it
+            words = set(tokens(f"{kv[0][0]} {kv[0][1]}"))
+            return (len(words & {"business", "ira", "roth", "traditional"}), kv[0])
+
         out, seen = [], set()
-        for (product, label, m), g in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])):
+        for (product, label, m), g in sorted(groups.items(), key=variant):
             a = g["fact"]
+            nums = [frozenset(PCT_RE.findall(v) or re.findall(r"\d[\d,.]*", v)) for v in g["values"]]
+            if any(x < y for x in nums for y in nums):
+                continue          # "2.90%" vs "2.90%–12.50%": the same cell parsed two ways, not a contradiction
             vals = tuple(sorted(g["values"]))
-            dedup = (re.sub(r"\W+", " ", f"{product} {label}").lower().strip(), m, vals)
+            dedup = (m, vals)     # the same rate change shown in several tables (personal, business, IRA)
             if dedup in seen:
                 continue
             seen.add(dedup)
@@ -1216,7 +1230,7 @@ class Knowledge:
 
     CLAIMS = [
         ("number of Dupaco branch locations",
-         re.compile(r"\b(\d{1,3})\s+(?:full-service\s+)?branch(?:es| office locations| locations)\b", re.I), "{} branch locations"),
+         re.compile(r"(?<![\d,.])\b(\d{1,3})\s+(?:full-service\s+)?branch(?:es| office locations| locations)\b", re.I), "{} branch locations"),
         ("number of times Forbes recognized Dupaco",
          re.compile(r"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth) time Forbes", re.I), "{} time Forbes recognized Dupaco"),
     ]
