@@ -1065,6 +1065,9 @@ class Knowledge:
         if rows[0].effective:
             text += f" (rates effective {rows[0].effective})"
         text += f". Source: {url}"
+        specials = self._current_specials(rows, sid)
+        if specials:
+            text += "\nCurrent specials: " + "; ".join(specials) + "."
         shown = {(f.label, tuple(sorted(f.measures.items()))) for f in rows}
         urls = sorted({f.url for _, f in good if f.url != url and f.authority >= rows[0].authority
                        and (f.label, tuple(sorted(f.measures.items()))) in shown})
@@ -1073,6 +1076,25 @@ class Knowledge:
         note = self._conflict_note(rows, sid)
         return Answer(text=text, sources=[Source(url=u, snapshot_id=snap.get(u, sid), quote=text[:200]) for u in urls],
                       conflict_note=note)
+
+    def _current_specials(self, rows, sid):
+        """A list of regular certificate terms also mentions the certificate specials on the same page, as of the
+        same snapshot (e.g. 10- and 17-month, regular and jumbo)."""
+        def is_cert(f):
+            return "certificate" in f.core | f.context
+        odd = {"special", "jumbo", "business", "ira", "roth", "traditional"}
+        if len(rows) < 3 or not all(is_cert(f) for f in rows) or any(f.core & odd for f in rows):
+            return []
+        out, seen = [], set()
+        for f in self.fact_view.get(sid, []):
+            if (f.url == rows[0].url and f.present and "special" in f.core and is_cert(f)
+                    and not f.core & {"business", "ira", "roth", "traditional"}):
+                m = "APY" if "APY" in f.measures else f.main_measure()
+                item = f"{f.label or f.product} {f.measures[m]} {m}"
+                if item not in seen:
+                    seen.add(item)
+                    out.append(item)
+        return out
 
     def _conflict_note(self, rows, sid):
         notes = []
