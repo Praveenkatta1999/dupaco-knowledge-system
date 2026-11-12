@@ -3,13 +3,41 @@
 A deterministic, rules-and-retrieval knowledge system over the five website snapshots.
 **No API key is needed. No LLM is called.** It uses only the Python standard library.
 
-## How to run
+## Running the eval
+
+The snapshot data is **not in this repo, by design**: the website data is shared for the event only and must not be redistributed. `snapshots/` and `snapshots_zip/` are listed in `.gitignore`.
+
+Before running, copy the kit's `snapshots_zip/` folder into the repo root:
+
+```text
+<repo root>/
+  snapshots_zip/              <- copy from the hackathon kit (5 zip files)
+    01_2026-05-12_baseline.zip
+    ...
+    05_2026-09-28_latest.zip
+  mysolution/
+  harness/
+  ...
+```
+
+Then, from the repo root:
 
 ```bash
+pip install -r requirements.txt          # no third-party packages; standard library only
 python harness/run_eval.py --submission mysolution --eval eval/public_eval.jsonl
 ```
 
-Loading all five snapshots takes about 7 s. Answers take well under 1 s at the 95th percentile.
+On the first run the scorer unpacks the zips into `snapshots/`. Without `snapshots_zip/`, the scorer stops with `FileNotFoundError: 'snapshots'`.
+
+Optional checks:
+
+```bash
+python harness/run_eval.py --submission mysolution --eval tests/my_questions.jsonl
+python harness/run_eval.py --submission mysolution --snapshots harness/selftest/snapshots \
+    --eval harness/selftest/eval.jsonl --conflicts-gold harness/selftest/conflicts_gold.json
+```
+
+Loading all five snapshots takes about 10 s. Answers take under 0.5 s at the 95th percentile.
 
 ## Approach
 
@@ -55,7 +83,13 @@ Questions are routed in this order:
      - all tiers of that one product when it doesn't;
      - one row for "highest" or "lowest";
      - personal products first, then business, for "what … do you offer".
-6. **Everything else:** sentence search.
+   - Certificate list answers add a second line with the current specials from the same page and snapshot.
+6. **Change questions:** this applies only when the question explicitly asks about change or history ("change", "changed", "previously", "used to", "before", "went up/down", "increase/decrease").
+   - The same row on the same page is followed snapshot by snapshot, and the answer is given as `old value (from date) → new value (from date)`.
+   - Rows relabelled between crawls are still followed (for example "2023–26 Model Year" becoming "2024-27 Model Year"). The match uses the same page, term and tier position.
+   - All other questions return only the current value.
+7. **Eligibility and requirements questions:** these are answered from the best whole *section*, meaning a heading plus its bullets. The heading must be about eligibility or requirements, and the section must cover the question's topic.
+8. **Everything else:** sentence search.
    - Scoring uses IDF, page authority, page-title context and a boost for FAQ questions.
    - For "how many X", only sentences that state a number before X are kept, and dated pages are preferred.
    - The best sentence is joined with the neighbouring sentence that covers the question words it is missing. When the section heading names what was asked, it is added as a prefix.
