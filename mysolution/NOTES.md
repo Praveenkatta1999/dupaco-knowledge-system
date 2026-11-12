@@ -84,11 +84,13 @@ Questions are routed in this order:
      - one row for "highest" or "lowest";
      - personal products first, then business, for "what … do you offer".
    - Certificate list answers add a second line with the current specials from the same page and snapshot.
+   - **Product families.** Each table is assigned one family (certificate, savings, checking, money market, HSA, IRA, auto, mortgage, home equity, card, …). The evidence is used in this order: the table's caption and row labels; then structure (a deposit table whose rows are terms is a certificate table); then the section caption and heading; then the page; then nearby text. A deposit/loan guard keeps APR tables out of the deposit families. A question that names a family uses only tables of that family. A copy of a table on a `/business` page ranks below the personal page's copy unless the question says "business".
 6. **Change questions:** this applies only when the question explicitly asks about change or history ("change", "changed", "previously", "used to", "before", "went up/down", "increase/decrease").
    - The same row on the same page is followed snapshot by snapshot, and the answer is given as `old value (from date) → new value (from date)`.
    - Rows relabelled between crawls are still followed (for example "2023–26 Model Year" becoming "2024-27 Model Year"). The match uses the same page, term and tier position.
    - All other questions return only the current value.
-7. **Eligibility and requirements questions:** these are answered from the best whole *section*, meaning a heading plus its bullets. The heading must be about eligibility or requirements, and the section must cover the question's topic.
+7. **Eligibility and requirements questions:** these are answered from the best whole *section*, meaning a heading plus its bullets. The heading must be about eligibility or requirements, and the section must cover the question's topic. If the answer mentions the "charter area", the site's service-area sentence ("serves residents in N counties throughout Iowa, … Wisconsin", from the newest dated page) is appended with its source.
+   - **Phone and contact questions** ("who do I call", "what number", "how do I report", "what should I do if …") are answered from a sentence that contains a phone number *and* the question's topic. Numbers are shown in `800-373-7600` form.
 8. **Everything else:** sentence search.
    - Scoring uses IDF, page authority, page-title context and a boost for FAQ questions.
    - For "how many X", only sentences that state a number before X are kept, and dated pages are preferred.
