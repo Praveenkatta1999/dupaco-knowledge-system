@@ -103,7 +103,7 @@ Different tiers are never reported as conflicts. The same change shown in person
 
 ## Testing
 
-- `tests/my_questions.jsonl` has 50 of my own questions, with expected values checked by hand against the raw snapshot pages. They cover:
+- `tests/my_questions.jsonl` has 52 of my own questions, with expected values checked by hand against the raw snapshot pages. They cover:
   - rewordings of public questions;
   - `as_of` dates;
   - other rates, fees and branches;
@@ -113,7 +113,7 @@ Different tiers are never reported as conflicts. The same change shown in person
   - phone and contact questions;
   - dated list questions that must not mix product families.
 
-  Score: **0.98**. Run it with `--eval tests/my_questions.jsonl`.
+  Score: **1.0**. Run it with `--eval tests/my_questions.jsonl`.
 - `harness/selftest`, run with `--conflicts-gold`, scores **1.0** (conflict F1 1.0).
 
 ## Known limitations
@@ -127,4 +127,4 @@ These are the public questions that still score below 1.0:
 | dup-060 (update contact info) | 0 | The only grounded answer is in the privacy policy. No general rule picks it out over better-matching sentences. |
 | dup-088 (volunteer time off) | 0 | We give the newest figure with its year (256 in 2024). The expected answer is the older 2023 figure (294). |
 
-In my own test set, the mobile-wallet list question still fails. The wallet names sit in a sentence that never says "mobile wallet".
+Every question in my own test set passes. One gap is known: a question like "When is the drive-up open?", which never says "hours", is not routed to the hours lookup. I left it that way on purpose, because widening the trigger to "open/close" would capture branch-closing questions that currently pass.
