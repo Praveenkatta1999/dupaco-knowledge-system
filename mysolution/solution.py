@@ -535,6 +535,9 @@ ROUTING_Q = re.compile(r"\brouting\b|\baba\b", re.I)
 SAME_Q = re.compile(r"\b(same|all branches|every branch|differ|different|vary|varies)\b", re.I)
 HOWTO_Q = re.compile(r"^\s*(how (do|can|should|would) (i|we)|how to|what should i do|what do i do)\b", re.I)
 WHO_Q = re.compile(r"^\s*who (is|are|can|qualifies)\b", re.I)
+REQ_Q = re.compile(r"\b(eligib\w*|requirements?|qualif\w*|what do i need|what does it take)\b", re.I)
+REQ_HEAD = {stem(w) for w in ("eligible", "eligibility", "requirement", "requirements", "qualify", "qualifications",
+                              "qualification", "who")}
 WHATIS_Q = re.compile(r"^\s*(what is|what's|what are|tell me about|describe|explain)\b", re.I)
 WEAK_INTENT = {stem(w) for w in ("eligible", "eligibility", "update", "change", "become", "way", "step", "steps",
                                  "process", "able", "allowed", "qualify", "qualifies", "program")}
@@ -1135,7 +1138,77 @@ class Knowledge:
                         return True
         return False
 
+    def _section_answer(self, q, sid):
+        """Eligibility/requirements questions: score whole sections (heading + body) and answer with the best
+        section's bullets/sentences instead of a lone sentence or the page intro. A section only qualifies when
+        its heading itself matches the question (e.g. "You're Eligible to Join If Any of These Sound Like You")."""
+        qtoks = [t for t in dict.fromkeys(tokens(q)) if t not in GENERIC and len(t) > 1]
+        if not qtoks:
+            return None
+        idf = {t: self._idf(t) for t in qtoks}
+        total = sum(idf.values())
+        best = None
+        docs = sorted({self.sents[i].doc for i in self._candidates(qtoks, sid)})
+        act = self._active(sid)
+        for d in docs:
+            doc = self.docs[d]
+            if doc.authority <= 0:
+                continue
+            sections = []                                   # consecutive sentences sharing a heading
+            for sidx in doc.sent_ids:
+                s = self.sents[sidx]
+                if s.text.endswith("?") and s.text == s.head_text:
+                    continue                                # the heading itself (FAQ question)
+                if sections and sections[-1][0] == s.head_text:
+                    sections[-1][1].append(sidx)
+                else:
+                    sections.append((s.head_text, [sidx]))
+            for head, sids in sections:
+                if not head or not sids:
+                    continue
+                ht = frozenset(tokens(head))
+                if not ht & REQ_HEAD:
+                    continue        # an eligibility/requirements question wants a section *about* eligibility
+                body = set().union(*(self.sents[i].toks for i in sids))
+                hs = sum(idf[t] for t in qtoks if token_hit(t, ht))
+                bs = sum(idf[t] for t in qtoks if not token_hit(t, ht) and token_hit(t, body))
+                if hs < 0.25 * total or (hs + bs) < 0.5 * total:
+                    continue
+                # the section must also be about the question's topic ("Extra Credit Student Loan", not any loan)
+                topic = [t for t in qtoks if t not in WEAK_INTENT and t not in REQ_HEAD]
+                tw = sum(idf[t] for t in topic)
+                if tw and sum(idf[t] for t in topic if token_hit(t, ht) or token_hit(t, body)) < 0.75 * tw:
+                    continue
+                w = (0.7 + 0.3 * doc.authority / 100) * (1.0 if act[d] else 0.7)
+                path = url_path(doc.url)
+                if LEGAL_URL.search(doc.url.lower()):
+                    w *= 0.6
+                elif path.startswith(MEMBER_PATHS):
+                    w *= 1.25
+                score = (1.5 * hs + bs) * w
+                key = (score, doc.pub or "9999", -sids[0])
+                if best is None or key > best[0]:
+                    best = (key, doc, head, sids)
+        if not best:
+            return None
+        _, doc, head, sids = best
+        body = []
+        for i in sids:
+            t = self.sents[i].text
+            if len(t) <= 300:
+                body.append(t)
+            if len(body) == 4:
+                break
+        if not body:
+            return None
+        text = f"{head}: " + " ".join(body)
+        return Answer(text=text[:700], sources=[Source(url=doc.url, snapshot_id=doc.snapshot_id, quote=body[0][:200])])
+
     def _search_answer(self, q, sid):
+        if WHO_Q.search(q) or REQ_Q.search(q):
+            a = self._section_answer(q, sid)
+            if a:
+                return a
         qtoks = [t for t in dict.fromkeys(tokens(q)) if t not in GENERIC and len(t) > 1]
         if not qtoks:
             return Answer(text=REFUSE_GENERAL, confident=False)
