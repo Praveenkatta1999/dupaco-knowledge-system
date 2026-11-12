@@ -126,7 +126,8 @@ CANON = {"closure": "close", "closing": "close", "closed": "close", "closes": "c
          "opening": "open", "cds": "certificate", "cd": "certificate", "certificates": "certificate",
          "eligible": "eligibility", "join": "join", "joining": "join", "membership": "member",
          "employees": "employee", "volunteering": "volunteer", "branches": "branch", "recognized": "recognition",
-         "recognize": "recognition", "rankings": "ranking", "ranked": "ranking", "ranks": "ranking"}
+         "recognize": "recognition", "rankings": "ranking", "ranked": "ranking", "ranks": "ranking",
+         "lost": "lose", "losing": "lose", "loses": "lose", "stolen": "stole", "intro": "introductory"}
 
 
 def stem(t: str) -> str:
@@ -310,7 +311,7 @@ LINE_FACT_RE = re.compile(r"^\s*(?:[-*]\s+)?\**([A-Za-z0-9][^:|\n]{2,80}?)\**:\s
 
 def extract_facts(md: str, url: str, title: str, auth: int) -> list:
     lines = md.split("\n")
-    facts, tid = [], 0
+    facts, tid, prev_end = [], 0, 0
     ctx_tokens = set(tokens(title)) | set(tokens(url_path(url).replace("-", " ")))
     i = 0
     while i < len(lines):
@@ -355,6 +356,11 @@ def extract_facts(md: str, url: str, title: str, auth: int) -> list:
         section = caps[1] if len(caps) > 1 else ""
         if header and header[0].lower() not in GENERIC_HEADERS and kinds[0] is None:
             caption = f"{caption} {header[0]}".strip()
+        # weak context: the text between the previous table and this one (footnotes, "Explore certificates" links),
+        # so a bare caption like "Regular" still inherits its subject
+        above = [x for x in lines[prev_end:i] if x.strip() and not x.startswith("|")][-12:]
+        near = " ".join(clean_inline(x) for x in above)[:1500]
+        near_tokens = set(tokens(near + " " + " ".join(re.findall(r"\]\(([^)]+)\)", near)).replace("-", " ").replace("/", " ")))
         eff = ""
         tail = "\n".join(lines[j:j + 8])
         m = EFFECTIVE_RE.search(tail)
@@ -385,13 +391,14 @@ def extract_facts(md: str, url: str, title: str, auth: int) -> list:
                 product=caption, label=label, measures=measures, url=url, effective=eff, authority=auth,
                 table_id=tid, term=term_months(label) or term_months(caption), amount=amount_range(label),
                 model_years=model_year_range(label), core=core,
-                context=(set(tokens(section)) | ctx_tokens) - core))
+                context=(set(tokens(section)) | ctx_tokens | near_tokens) - core))
         ranges = sorted({f.model_years for f in table_facts if f.model_years}, key=lambda r: -r[1])
         for f in table_facts:
             if f.model_years:
                 f.my_rank = ranges.index(f.model_years)
         facts.extend(table_facts)
         i = j
+        prev_end = j
     return facts
 
 
@@ -490,7 +497,7 @@ def parse_locator(lines: list) -> list:
 SYNONYMS = {
     "mortgage": {"mortgage", "conventional"},
     "car": {"auto"}, "vehicle": {"auto"}, "automobile": {"auto"}, "truck": {"auto"},
-    "heloc": {"heloc", "equity"}, "card": {"visa", "card"}, "credit": {"visa", "credit"},
+    "heloc": {"heloc"}, "card": {"visa", "card"}, "credit": {"visa", "credit"},
     "open": {"open", "close"}, "close": {"close", "open"},
 }
 GENERIC = set("""
@@ -500,6 +507,7 @@ those there their dupaco dupacos rate rate interest apy apr yield dividend annua
 now today tell give show provide list know like want please get earn pay paying offer account s on
 balance between tier level amount type kind option available still also just so if as by up out than then here
 need looking find see check say said thing way new go going has have having had receive received got gotten
+finance financing borrow borrowing buy buying over under within across during after before through per
 january february march april may june july august september october november december
 standard purchase regular ongoing base variable usual normal typical
 """.split())
@@ -509,9 +517,9 @@ DISTINGUISH = {"business", "jumbo", "roth", "traditional", "ira", "refinance", "
 SUPER_HI = {"highest", "best", "top", "maximum", "most"}
 SUPER_LO = {"lowest", "cheapest", "minimum", "least"}
 
-RATE_Q = re.compile(r"\b(rates?|apys?|aprs?|yields?|dividends?|interest)\b|%", re.I)
+RATE_Q = re.compile(r"\b(rates?|apys?|aprs?|yields?|dividends?|interest|earns?|earning|pays?)\b|%", re.I)
 RATE_ASK = re.compile(r"\b(rates?|apys?|aprs?|yields?|dividend rates?|interest rates?)\b", re.I)
-FEE_Q = re.compile(r"\b(fees?|cost|costs|charge|charges|how much is|how much does|price)\b", re.I)
+FEE_Q = re.compile(r"\b(fees?|cost|costs|charge|charges|price)\b", re.I)
 MEASURE_Q = [("APY", re.compile(r"\bapy\b|annual percentage yield|\byield\b", re.I)),
              ("APR", re.compile(r"\bapr\b|annual percentage rate", re.I)),
              ("dividend rate", re.compile(r"dividend", re.I))]
@@ -524,6 +532,7 @@ HOURS_Q = re.compile(r"\bhours?\b|\bwhat time\b|\bopen until\b", re.I)
 ADDRESS_Q = re.compile(r"\b(address|located|location of|where is)\b", re.I)
 ROUTING_Q = re.compile(r"\brouting\b|\baba\b", re.I)
 SAME_Q = re.compile(r"\b(same|all branches|every branch|differ|different|vary|varies)\b", re.I)
+COUNT_WORDS = {"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"}
 OFFER_Q = re.compile(r"\b(do|does) (you|dupaco) (have|offer|provide)\b|\bany\b[\w\s]{0,30}\boptions?\b", re.I)
 BRANCH_NAME_RX = re.compile(r"\b([A-Z][\w.'&-]*(?:\s+[A-Z][\w.'&-]*){0,3})\s+(?i:branch|office|location)\b")
 NOT_BRANCH = {"dupaco", "the", "your", "our", "all", "any", "each", "every", "nearest", "closest", "local", "main",
@@ -575,8 +584,8 @@ def token_hit(t: str, bag) -> bool:
 
 def score_fact(qu: Query, f: Fact):
     """(score, coverage), or None if the fact contradicts a qualifier in the question."""
-    if qu.term and f.term and qu.term != f.term:
-        return None
+    if qu.term and qu.term != f.term:
+        return None          # a different term, or a row with no term, cannot answer "the 17-month ..." rate
     if qu.year and f.model_years and not (f.model_years[0] <= qu.year <= f.model_years[1]):
         return None
     if qu.amount is not None and f.amount and not (f.amount[0] <= qu.amount <= f.amount[1]):
@@ -924,10 +933,16 @@ class Knowledge:
             rows = [f for s, f in good if s >= top - 0.5]
             return self._format_facts(qu, sid, rows, good)
         good = [(s, f) for s, f in good if f.authority == top_auth]
-        page_best = {}
+        page_best, page_eff = {}, {}
         for s, f in good:
-            page_best[f.url] = max(page_best.get(f.url, -1e9), s)
-        url = sorted(page_best, key=lambda u: (-page_best[u], u))[0]
+            if s > page_best.get(f.url, -1e9):
+                page_best[f.url] = s
+                page_eff[f.url] = any_date_iso(f.effective) if f.effective else ""
+        # equally authoritative pages that match about equally: the newest "rates effective as of" date wins
+        # (an old copy of the auto table left on another product page loses to the auto page's own table)
+        best_page_score = max(page_best.values())
+        close = [u for u in page_best if page_best[u] >= best_page_score - 0.01]
+        url = sorted(close, key=lambda u: (page_eff[u], page_best[u], u), reverse=True)[0]
         top = page_best[url]
         rows = [f for s, f in good if f.url == url and s >= top - 1e-9]
         return self._format_facts(qu, sid, rows, good)
@@ -1023,7 +1038,7 @@ class Knowledge:
         """True if a number directly precedes one of the question's nouns ('22 branch', '294 Dupaco employees')."""
         words = re.findall(r"[\w,'-]+", text.lower())
         for i, w in enumerate(words):
-            if re.fullmatch(r"\d[\d,]*", w):
+            if re.fullmatch(r"\d[\d,]*", w) or w in COUNT_WORDS:
                 for nxt in words[i + 1:i + 3]:
                     if stem(nxt.strip(",'")) in qtoks:
                         return True
