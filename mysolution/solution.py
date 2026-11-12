@@ -508,7 +508,7 @@ those there their dupaco dupacos rate rate interest apy apr yield dividend annua
 now today tell give show provide list know like want please get earn pay paying offer account s on
 balance between tier level amount type kind option available still also just so if as by up out than then here
 need looking find see check say said thing way new go going has have having had receive received got gotten
-finance financing borrow borrowing buy buying over under within across during after before through per
+finance financing borrow borrowing buy buying over under within across during after before through per since ago
 january february march april may june july august september october november december
 standard purchase regular ongoing base variable usual normal typical
 """.split())
@@ -541,8 +541,11 @@ WEAK_INTENT = {stem(w) for w in ("eligible", "eligibility", "update", "change", 
 LEGAL_URL = re.compile(r"\.pdf|/hubfs/|disclosure|privacy|policy|terms|agreement|conditions")
 MEMBER_PATHS = ("/about", "/contact", "/join", "/membership", "/member", "/faq")
 AMOUNT_RX = re.compile(r"\$\s?\d|\d+(?:\.\d+)?%|\b(?:19|20)\d\d\b|\bup to\b|\bmaximum\b|\bminimum\b|\blimit", re.I)
-ACTION_RX = re.compile(r"\b\d{3}[-.)\s]\d{3}[-.]\d{4}\b|https?://|\bwww\.|\b(call|visit|log in|login|sign in|online|"
-                       r"go to|stop by|contact us|app)\b", re.I)
+ACTION_RX = re.compile(r"\b\d{3}[-.)\s]\d{3}[-.]\d{4}\b|https?://|\bwww\.|\b(call|visit|log in|login|logging in|"
+                       r"sign in|signing in|online|go to|stop by|contact us|app)\b", re.I)
+# only questions that explicitly ask about change/history get the old -> new timeline
+CHANGE_Q = re.compile(r"\b(changed?|changes|previous(?:ly)?|used to(?: be)?|before|go(?:ne)? (?:up|down)|"
+                      r"went (?:up|down)|increased?|decreased?|history)\b", re.I)
 CONTINUE_RX = re.compile(r"^(this (initiative|program|benefit|offer|account|loan|card|service|grant)|"
                          r"you (may|can) also|or you can|alternatively|additionally)\b", re.I)
 COUNT_WORDS = {"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"}
@@ -790,6 +793,10 @@ class Knowledge:
             a = self._address_answer(q, sid)
             if a:
                 return a
+        if CHANGE_Q.search(q) and (RATE_Q.search(q) or FEE_Q.search(q)):
+            a = self._change_answer(q, sid)
+            if a:
+                return a
         if RATE_Q.search(q) or FEE_Q.search(q):
             a = self._fact_answer(q, sid)
             if a:
@@ -934,6 +941,11 @@ class Knowledge:
         return sorted(good, key=lambda f: (-f.authority, not f.present, f.url))[0]
 
     def _fact_answer(self, q, sid):
+        sel = self._select_facts(q, sid)
+        return self._format_facts(*sel) if sel else None
+
+    def _select_facts(self, q, sid):
+        """(query, snapshot, chosen rows, all good candidates) or None."""
         qu, scored = self._rank_facts(q, sid)
         if not scored:
             return None
@@ -944,7 +956,7 @@ class Knowledge:
             good = sorted(((s, f) for s, f in good if f.authority >= 90), key=lambda x: (-x[0], x[1].url))
             top = good[0][0]
             rows = [f for s, f in good if s >= top - 0.5]
-            return self._format_facts(qu, sid, rows, good)
+            return qu, sid, rows, good
         good = [(s, f) for s, f in good if f.authority == top_auth]
         page_best, page_eff = {}, {}
         for s, f in good:
@@ -955,10 +967,76 @@ class Knowledge:
         # (an old copy of the auto table left on another product page loses to the auto page's own table)
         best_page_score = max(page_best.values())
         close = [u for u in page_best if page_best[u] >= best_page_score - 0.01]
-        url = sorted(close, key=lambda u: (page_eff[u], page_best[u], u), reverse=True)[0]
+        # newest effective date, then score; exact ties go to the alphabetically first URL (stable sort)
+        url = sorted(sorted(close), key=lambda u: (page_eff[u], page_best[u]), reverse=True)[0]
         top = page_best[url]
         rows = [f for s, f in good if f.url == url and s >= top - 1e-9]
-        return self._format_facts(qu, sid, rows, good)
+        return qu, sid, rows, good
+
+    # ---- "has the rate changed?": the same row on the same page, snapshot by snapshot
+    def _change_answer(self, q, sid):
+        sel = self._select_facts(CHANGE_Q.sub(" ", q), sid)
+        if not sel:
+            return None
+        qu, _, rows, good = sel
+        seen, uniq = set(), []
+        for f in rows:
+            k = (f.label or f.product, f.main_measure())
+            if k not in seen:
+                seen.add(k)
+                uniq.append(f)
+        sid_day = dict((s, d) for d, s in self.snapshots)[sid]
+        first_day = self.snapshots[0][0]
+        parts, used_url = [], None
+        for f in uniq[:3]:
+            m = qu.measure if qu.measure in f.measures else f.main_measure()
+            # the same row may sit on several equally authoritative pages; use the one with the longest history
+            twins = [f] + [g for _, g in good if g.url != f.url and g.label == f.label and g.measures == f.measures]
+            best_hist, best_f = [], f
+            for g in sorted(twins, key=lambda g: g.url):
+                hist = []
+                for day, osid in self.snapshots:
+                    if day > sid_day:
+                        break
+                    v = self._same_row_value(g, m, osid)
+                    if v is not None:
+                        hist.append((day, v))
+                if len(hist) > len(best_hist):
+                    best_hist, best_f = hist, g
+            if not best_hist:
+                continue
+            segs = []
+            for day, v in best_hist:
+                if not segs or segs[-1][1] != v:
+                    segs.append((day, v))
+            name = f"{f.product} {f.label}".strip() + f" {m}"
+            if len(segs) > 1:
+                parts.append(f"{name}: " + " → ".join(f"{v} (from {d})" for d, v in segs))
+            elif segs[0][0] == first_day:
+                parts.append(f"{name}: unchanged at {segs[0][1]} in every snapshot from {first_day} to {sid_day}")
+            else:
+                parts.append(f"{name}: first listed on {segs[0][0]} at {segs[0][1]}, unchanged since")
+            used_url = used_url or best_f.url
+        if not parts:
+            return None
+        return Answer(text="; ".join(parts) + f". Source: {used_url}",
+                      sources=[Source(url=used_url, snapshot_id=sid, quote=parts[0][:200])])
+
+    def _same_row_value(self, f, m, osid):
+        """Value of the same row in another snapshot: same page and label, or (when tier labels were renamed,
+        e.g. '2023-26 Model Year' -> '2024-27 Model Year') same page, caption, term and tier position."""
+        exact = alt = None
+        lab = re.sub(r"\W+", " ", f.label or f.product).lower().strip()
+        for g in self.fact_view[osid]:
+            if not g.present or g.url != f.url or m not in g.measures:
+                continue
+            if re.sub(r"\W+", " ", g.label or g.product).lower().strip() == lab:
+                exact = g.measures[m]
+                break
+            if (alt is None and f.my_rank is not None and g.my_rank == f.my_rank and g.term == f.term
+                    and set(tokens(g.product)) & set(tokens(f.product)) - GENERIC):   # captions get reworded too
+                alt = g.measures[m]
+        return exact if exact is not None else alt
 
     def _format_facts(self, qu, sid, rows, good):
         url = rows[0].url
