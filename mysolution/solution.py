@@ -127,7 +127,8 @@ CANON = {"closure": "close", "closing": "close", "closed": "close", "closes": "c
          "eligible": "eligibility", "join": "join", "joining": "join", "membership": "member",
          "employees": "employee", "volunteering": "volunteer", "branches": "branch", "recognized": "recognition",
          "recognize": "recognition", "rankings": "ranking", "ranked": "ranking", "ranks": "ranking",
-         "lost": "lose", "losing": "lose", "loses": "lose", "stolen": "stole", "intro": "introductory"}
+         "lost": "lose", "losing": "lose", "loses": "lose", "stolen": "stole", "intro": "introductory",
+         "update": "change", "updating": "change", "changing": "change", "changes": "change"}
 
 
 def stem(t: str) -> str:
@@ -532,6 +533,8 @@ HOURS_Q = re.compile(r"\bhours?\b|\bwhat time\b|\bopen until\b", re.I)
 ADDRESS_Q = re.compile(r"\b(address|located|location of|where is)\b", re.I)
 ROUTING_Q = re.compile(r"\brouting\b|\baba\b", re.I)
 SAME_Q = re.compile(r"\b(same|all branches|every branch|differ|different|vary|varies)\b", re.I)
+CONTINUE_RX = re.compile(r"^(this (initiative|program|benefit|offer|account|loan|card|service|grant)|"
+                         r"you (may|can) also|or you can|alternatively|additionally)\b", re.I)
 COUNT_WORDS = {"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"}
 OFFER_Q = re.compile(r"\b(do|does) (you|dupaco) (have|offer|provide)\b|\bany\b[\w\s]{0,30}\boptions?\b", re.I)
 BRANCH_NAME_RX = re.compile(r"\b([A-Z][\w.'&-]*(?:\s+[A-Z][\w.'&-]*){0,3})\s+(?i:branch|office|location)\b")
@@ -1126,7 +1129,13 @@ class Knowledge:
                 extra = pos - 1
             elif (len(s.text) < 80 or s.text.endswith("?")) and pos + 1 < len(ids):
                 extra = pos + 1
-        order = sorted({pos} | ({extra} if extra is not None else set()))
+        order = {pos} | ({extra} if extra is not None else set())
+        # a sentence that continues the chosen one ("This initiative provides up to $15,000...",
+        # "You may also call ...") belongs to the same answer
+        nxt = max(order) + 1
+        if nxt < len(ids) and CONTINUE_RX.match(self.sents[ids[nxt]].text):
+            order.add(nxt)
+        order = sorted(order)
         text = " ".join(self.sents[ids[k]].text for k in order)[:700]
         # give a bare sentence its subject: prefix the section heading when it names what was asked
         shown = set().union(*(self.sents[ids[k]].toks for k in order))
