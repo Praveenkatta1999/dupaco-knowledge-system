@@ -412,6 +412,8 @@ class Sent:
     text: str
     toks: frozenset
     head: frozenset       # tokens of the enclosing heading + page title
+    head_text: str = ""   # the enclosing heading itself (used to give a bare sentence its subject)
+    title: frozenset = frozenset()
 
 
 @dataclass
@@ -497,10 +499,11 @@ should you your i im me my we our us it its of on in at to for from with and or 
 those there their dupaco dupacos rate rate interest apy apr yield dividend annual percentage current currently right
 now today tell give show provide list know like want please get earn pay paying offer account s on
 balance between tier level amount type kind option available still also just so if as by up out than then here
-need looking find see check say said thing way new go going
+need looking find see check say said thing way new go going has have having had receive received got gotten
 january february march april may june july august september october november december
 standard purchase regular ongoing base variable usual normal typical
 """.split())
+GENERIC = GENERIC | {stem(w) for w in GENERIC}      # questions are stemmed before this check ("does" -> "doe")
 DISTINGUISH = {"business", "jumbo", "roth", "traditional", "ira", "refinance", "introductory", "intro",
                "transfer", "health", "mini", "max", "minimax", "summer", "special"}
 SUPER_HI = {"highest", "best", "top", "maximum", "most"}
@@ -521,6 +524,7 @@ HOURS_Q = re.compile(r"\bhours?\b|\bwhat time\b|\bopen until\b", re.I)
 ADDRESS_Q = re.compile(r"\b(address|located|location of|where is)\b", re.I)
 ROUTING_Q = re.compile(r"\brouting\b|\baba\b", re.I)
 SAME_Q = re.compile(r"\b(same|all branches|every branch|differ|different|vary|varies)\b", re.I)
+OFFER_Q = re.compile(r"\b(do|does) (you|dupaco) (have|offer|provide)\b|\bany\b[\w\s]{0,30}\boptions?\b", re.I)
 BRANCH_NAME_RX = re.compile(r"\b([A-Z][\w.'&-]*(?:\s+[A-Z][\w.'&-]*){0,3})\s+(?i:branch|office|location)\b")
 NOT_BRANCH = {"dupaco", "the", "your", "our", "all", "any", "each", "every", "nearest", "closest", "local", "main",
               "my", "a", "which", "what", "do", "does", "is", "are", "can", "general", "branch"}
@@ -689,6 +693,7 @@ class Knowledge:
         doc.routing = ROUTING_RE.findall(md)
         title_toks = set(tokens(doc.title))
         heading = frozenset(title_toks)
+        self._head_text, self._title = "", frozenset(title_toks)
         for line in lines:
             s = line.strip()
             if not s or s.startswith(("|", "![", "[![")):
@@ -696,6 +701,7 @@ class Knowledge:
             if s.startswith("#"):
                 heading = frozenset(set(tokens(clean_inline(s))) | title_toks)
                 txt = clean_inline(s)
+                self._head_text = txt if len(txt) <= 80 else ""
                 if txt.endswith("?"):           # FAQ question headings are searchable too
                     self._add_sent(idx, doc, txt, heading)
                 continue
@@ -716,7 +722,7 @@ class Knowledge:
         if not toks:
             return
         sidx = len(self.sents)
-        self.sents.append(Sent(idx, text, toks, heading))
+        self.sents.append(Sent(idx, text, toks, heading, self._head_text, self._title))
         doc.sent_ids.append(sidx)
         for t in toks | heading:
             self.postings[t].append(sidx)
@@ -1012,6 +1018,17 @@ class Knowledge:
         df = len(self.postings.get(t, ())) or 1
         return math.log(1 + len(self.sents) / df)
 
+    @staticmethod
+    def _counts_noun(text, qtoks):
+        """True if a number directly precedes one of the question's nouns ('22 branch', '294 Dupaco employees')."""
+        words = re.findall(r"[\w,'-]+", text.lower())
+        for i, w in enumerate(words):
+            if re.fullmatch(r"\d[\d,]*", w):
+                for nxt in words[i + 1:i + 3]:
+                    if stem(nxt.strip(",'")) in qtoks:
+                        return True
+        return False
+
     def _search_answer(self, q, sid):
         qtoks = [t for t in dict.fromkeys(tokens(q)) if t not in GENERIC and len(t) > 1]
         if not qtoks:
@@ -1036,8 +1053,10 @@ class Knowledge:
                 continue
             w = (0.7 + 0.3 * doc.authority / 100) * (1.0 if act[s.doc] else 0.7)
             w *= 1.0 if len(s.text) < 350 else 0.85
-            if count_q and re.search(r"\d", s.text):
-                w *= 1.3          # "how many ..." wants a sentence that states a number
+            # the page title supplies context the sentence lacks (a "flexible options" line on the Student Loans page)
+            w *= 1.0 + 0.2 * sum(1 for t in qtoks if token_hit(t, s.title) and not token_hit(t, s.toks))
+            if s.text.endswith("?") and sc >= 0.7 * total:
+                w *= 1.35         # an FAQ question matching the member's question; its answer follows it
             scored.append((sc * w, cov / total, sidx))
         if not scored:
             return Answer(text=REFUSE_GENERAL, confident=False)
@@ -1045,12 +1064,33 @@ class Knowledge:
         best_cov = max(x[1] for x in scored if x[0] == best)
         if best_cov < 0.45:
             return Answer(text=REFUSE_GENERAL, confident=False)
-        cands = [x for x in scored if x[0] >= 0.8 * best]
+        pool = scored
+        if OFFER_Q.search(q):
+            # "do you have/offer any X": a question about products, answered from product pages when they are relevant
+            prod = [x for x in scored if self.docs[self.sents[x[2]].doc].authority >= 90 and x[1] >= 0.3]
+            pool = prod or pool
+        if count_q:
+            # "how many X": only sentences stating "<number> ... X"; counts change over time and only dated
+            # statements can be ordered, so dated pages are preferred
+            counted = [x for x in scored if self._counts_noun(self.sents[x[2]].text, qtoks)]
+            if counted:
+                dated = [x for x in counted if self.docs[self.sents[x[2]].doc].pub]
+                pool = dated or counted
+        top = max(x[0] for x in pool)
+        # near-ties (the same fact repeated across pages/years): the most recently published page wins
+        cands = [x for x in pool if x[0] >= (0.75 if count_q else 0.9) * top]
+
+        self._last_cands = cands     # kept for debugging only
+
+        def own_cov(sidx):     # share of the question the sentence itself states (not its heading/title)
+            st = self.sents[sidx].toks
+            return round(sum(weights[t] for t in qtoks if token_hit(t, st)) / total, 3)
 
         def rank(x):
             doc = self.docs[self.sents[x[2]].doc]
-            bucket = 2 if doc.authority >= 80 else 1 if doc.authority >= 40 else 0
-            return (bucket, doc.pub or doc.taken_on, x[0], -x[2])
+            # undated pages that are live in this view are current; dated articles are ordered by publication
+            when = doc.pub or "9999"
+            return (when, own_cov(x[2]), x[0], doc.authority, -x[2])
         _, _, sidx = max(cands, key=rank)
         s = self.sents[sidx]
         doc = self.docs[s.doc]
@@ -1073,6 +1113,11 @@ class Knowledge:
                 extra = pos + 1
         order = sorted({pos} | ({extra} if extra is not None else set()))
         text = " ".join(self.sents[ids[k]].text for k in order)[:700]
+        # give a bare sentence its subject: prefix the section heading when it names what was asked
+        shown = set().union(*(self.sents[ids[k]].toks for k in order))
+        if s.head_text and not s.text.endswith("?") and any(
+                token_hit(t, frozenset(tokens(s.head_text))) and not token_hit(t, shown) for t in qtoks):
+            text = f"{s.head_text}: {text}"
         return Answer(text=text, sources=[Source(url=doc.url, snapshot_id=doc.snapshot_id, quote=s.text[:200])])
 
     # ------------------------------------------------------------------ conflicts
