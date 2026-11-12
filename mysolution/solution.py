@@ -505,6 +505,7 @@ def clean_inline(s: str, links: list = None) -> str:
             links.append((m.group(2), m.group(3)))
         return m.group(2)
     s = LINK_MD.sub(_link, s)
+    s = re.sub(r"\]\(\S*?\)", "", s)      # tail of a link that started on an earlier line: "Features](https://...)"
     s = re.sub(r"\\([*_#>\[\]()-])", r"\1", s)
     s = re.sub(r"[*_]{2,}|^#+\s*|^>\s*|^[-*]\s+", "", s.strip())
     return s.replace("\\r\\n", " ").strip()
@@ -557,6 +558,8 @@ SYNONYMS = {
     "car": {"auto"}, "vehicle": {"auto"}, "automobile": {"auto"}, "truck": {"auto"},
     "heloc": {"heloc"}, "card": {"visa", "card"}, "credit": {"visa", "credit"},
     "open": {"open", "close"}, "close": {"close", "open"},
+    # a wallet is named by its brand on the site ("Apple Pay, Google Pay or Samsung Pay")
+    "wallet": {"wallet", "apple", "google", "samsung"}, "digital": {"digital", "mobile"},
 }
 GENERIC = set("""
 a an the is are was were be been what whats which who whom how much many do does did can could would will shall
@@ -599,6 +602,9 @@ US_STATE_RX = re.compile(r"\b(Alabama|Alaska|Arizona|Arkansas|California|Colorad
                          r"New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|"
                          r"Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|"
                          r"West Virginia|Wisconsin|Wyoming)\b")
+WHICH_Q = re.compile(r"^\s*(which|what)\s+(\w+\s+){0,2}\w+s\b", re.I)
+_NAME = r"[A-Z][\w'-]*(?:\s+[A-Z][\w'-]*)?"
+ENUM_RX = re.compile(_NAME + r",\s+" + _NAME + r",?\s+(?:or|and)\s+" + _NAME)   # "A, B or C"
 PHONE_Q = re.compile(r"\b(phone|telephone|what number|which number|number (do|should|can) i call|"
                      r"who (do|should|can) i (call|contact)|how (do|can|should) i report|report (a|my|it)|"
                      r"what (should|do) i do (if|when))\b", re.I)
@@ -1376,6 +1382,7 @@ class Knowledge:
             key_terms = [t for t in qtoks if t not in WEAK_INTENT]
         total = sum(weights.values())
         count_q = bool(re.search(r"\bhow (many|much)\b|\bnumber of\b", q, re.I))
+        which_q = bool(WHICH_Q.search(q))     # "which/what <things> ..." asks for named items
         scored = []
         for sidx in self._candidates(qtoks, sid):
             s = self.sents[sidx]
@@ -1394,6 +1401,8 @@ class Knowledge:
             w *= 1.0 if len(s.text) < 350 else 0.85
             # the page title supplies context the sentence lacks (a "flexible options" line on the Student Loans page)
             w *= 1.0 + 0.2 * sum(1 for t in qtoks if token_hit(t, s.title) and not token_hit(t, s.toks))
+            if which_q and ENUM_RX.search(s.text):
+                w *= 1.3          # a sentence that lists several named items ("Apple Pay, Google Pay or Samsung Pay")
             if s.text.endswith("?") and sc >= 0.7 * total:
                 w *= 1.35         # an FAQ question matching the member's question; its answer follows it
             if intent:
